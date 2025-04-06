@@ -22,8 +22,12 @@ const documentSchema = new mongoose.Schema({
     required: true
   },
   summary: {
-    type: String,
-    default: ''
+    type: mongoose.Schema.Types.Mixed,
+    default: {
+      key_points: [],
+      tables: [],
+      highlights: []
+    }
   },
   status: {
     type: String,

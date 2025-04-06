@@ -12,7 +12,7 @@ const Home = () => {
     setIsLoading(true);
     setProcessingStatus('Uploading document...');
     setSummary('');
-    
+
     try {
       const formData = new FormData();
       formData.append('document', file);
@@ -44,17 +44,17 @@ const Home = () => {
 
   const pollForSummary = async (documentId, interval = 2000, timeout = 120000) => {
     const startTime = Date.now();
-    
+
     while (Date.now() - startTime < timeout) {
       try {
         const response = await fetch(`http://localhost:3000/api/document/${documentId}`);
-        
+
         if (!response.ok) {
           throw new Error(`Failed to fetch status: ${response.status}`);
         }
 
         const data = await response.json();
-        
+
         if (!data.success) {
           throw new Error(data.error || 'Server returned unsuccessful response');
         }
@@ -67,14 +67,14 @@ const Home = () => {
         } else if (data.document.status === 'failed') {
           throw new Error(data.document.error || 'Document processing failed');
         }
-        
+
         await new Promise(resolve => setTimeout(resolve, interval));
       } catch (error) {
         console.error('Polling error:', error);
         throw error;
       }
     }
-    
+
     throw new Error('Processing timeout exceeded');
   };
 
@@ -115,11 +115,10 @@ const Home = () => {
         {/* Results Section */}
         <div className="mt-12 max-w-4xl mx-auto">
           {processingStatus && (
-            <div className={`p-4 rounded-lg mb-6 transition-all duration-300 ${
-              processingStatus.startsWith('Error:') 
-                ? 'bg-red-50 border border-red-200' 
-                : 'bg-blue-50 border border-blue-200'
-            }`}>
+            <div className={`p-4 rounded-lg mb-6 transition-all duration-300 ${processingStatus.startsWith('Error:')
+              ? 'bg-red-50 border border-red-200'
+              : 'bg-blue-50 border border-blue-200'
+              }`}>
               <div className="flex items-start">
                 {isLoading ? (
                   <Loader2 className="w-5 h-5 mr-3 mt-0.5 text-blue-600 animate-spin" />
@@ -131,9 +130,8 @@ const Home = () => {
                   </div>
                 )}
                 <div>
-                  <p className={`font-medium ${
-                    processingStatus.startsWith('Error:') ? 'text-red-600' : 'text-blue-600'
-                  }`}>
+                  <p className={`font-medium ${processingStatus.startsWith('Error:') ? 'text-red-600' : 'text-blue-600'
+                    }`}>
                     {processingStatus}
                   </p>
                   {processingStatus.includes('OCR') && (
@@ -155,16 +153,98 @@ const Home = () => {
                 </h3>
               </div>
               <div className="p-6">
-                <div className="prose max-w-none">
-                  {summary.split('\n').map((para, i) => (
-                    <p key={i} className="mb-4 text-gray-700 leading-relaxed">
-                      {para}
-                    </p>
-                  ))}
-                </div>
+                {/* Handle both string and structured summaries */}
+                {typeof summary === 'string' ? (
+                  <div className="prose max-w-none">
+                    {summary.split('\n').map((para, i) => (
+                      <p key={i} className="mb-4 text-gray-700 leading-relaxed">
+                        {para}
+                      </p>
+                    ))}
+                  </div>
+                ) : (
+                  <>
+                    {/* Key Points Section */}
+                    {summary.key_points && summary.key_points.length > 0 && (
+                      <div className="mb-8">
+                        <h4 className="text-lg font-semibold text-gray-800 mb-4 flex items-center">
+                          <span className="w-2 h-2 bg-blue-600 rounded-full mr-2"></span>
+                          Key Points
+                        </h4>
+                        <ul className="space-y-3">
+                          {summary.key_points.map((point, index) => (
+                            <li key={index} className="flex items-start">
+                              <span className="text-blue-600 mr-2">•</span>
+                              <span className="text-gray-700">{point}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+
+                    {/* Tables Section */}
+                    {summary.tables && summary.tables.length > 0 && (
+                      <div className="mb-8">
+                        <h4 className="text-lg font-semibold text-gray-800 mb-4 flex items-center">
+                          <span className="w-2 h-2 bg-blue-600 rounded-full mr-2"></span>
+                          Structured Information
+                        </h4>
+                        <div className="space-y-6">
+                          {summary.tables.map((table, index) => (
+                            <div key={index} className="overflow-x-auto">
+                              <h5 className="text-md font-medium text-gray-700 mb-2">{table.title}</h5>
+                              <table className="min-w-full divide-y divide-gray-200">
+                                <thead className="bg-gray-50">
+                                  <tr>
+                                    {Object.keys(table.data[0]).map((header) => (
+                                      <th key={header} className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                        {header}
+                                      </th>
+                                    ))}
+                                  </tr>
+                                </thead>
+                                <tbody className="bg-white divide-y divide-gray-200">
+                                  {table.data.map((row, rowIndex) => (
+                                    <tr key={rowIndex}>
+                                      {Object.values(row).map((value, colIndex) => (
+                                        <td key={colIndex} className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                                          {value}
+                                        </td>
+                                      ))}
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Highlights Section */}
+                    {summary.highlights && summary.highlights.length > 0 && (
+                      <div className="mb-8">
+                        <h4 className="text-lg font-semibold text-gray-800 mb-4 flex items-center">
+                          <span className="w-2 h-2 bg-blue-600 rounded-full mr-2"></span>
+                          Important Clauses
+                        </h4>
+                        <div className="space-y-3">
+                          {summary.highlights.map((highlight, index) => (
+                            <div key={index} className="bg-yellow-50 border-l-4 border-yellow-400 p-4">
+                              <p className="text-gray-700">{highlight}</p>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </>
+                )}
+
                 <div className="mt-6 pt-4 border-t border-gray-100 flex justify-end">
-                  <button 
-                    onClick={() => navigator.clipboard.writeText(summary)}
+                  <button
+                    onClick={() => navigator.clipboard.writeText(
+                      typeof summary === 'string' ? summary : JSON.stringify(summary, null, 2)
+                    )}
                     className="px-4 py-2 bg-blue-50 hover:bg-blue-100 text-blue-600 rounded-md text-sm font-medium transition-colors"
                   >
                     Copy Summary

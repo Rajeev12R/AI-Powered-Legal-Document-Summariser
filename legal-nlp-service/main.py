@@ -110,18 +110,70 @@ async def summarize_document(file: UploadFile = File(...)):
             os.unlink(temp_file_path)
 
 def summarize_legal_text(text: str, max_length: int = 512) -> str:
-    """Generate summary using pre-trained model"""
+    """Generate structured summary using pre-trained model"""
     try:
         cleaned_text = clean_text(text)
         chunk_size = 1024
         chunks = [cleaned_text[i:i+chunk_size] for i in range(0, len(cleaned_text), chunk_size)]
         
+        # Generate initial summary
         summaries = []
         for chunk in chunks:
             summary = summarizer(chunk, max_length=max_length, min_length=30, do_sample=False)
             summaries.append(summary[0]['summary_text'])
         
-        return " ".join(summaries)
+        full_summary = " ".join(summaries)
+        
+        # Structure the summary into points and tables
+        structured_summary = {
+            "key_points": [],
+            "tables": [],
+            "highlights": []
+        }
+        
+        # Extract key points (sentences that contain important legal terms)
+        legal_terms = ["shall", "must", "obligation", "right", "duty", "liability", "warranty", "indemnity"]
+        sentences = re.split(r'(?<=[.!?])\s+', full_summary)
+        for sentence in sentences:
+            if any(term in sentence.lower() for term in legal_terms):
+                structured_summary["key_points"].append(sentence)
+        
+        # Create tables for structured information
+        # Example: Extract parties, dates, amounts
+        parties = re.findall(r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s+(?:shall|must|agrees)', full_summary)
+        dates = re.findall(r'\d{1,2}[-/]\d{1,2}[-/]\d{2,4}', full_summary)
+        amounts = re.findall(r'\$\d+(?:,\d{3})*(?:\.\d{2})?', full_summary)
+        
+        if parties:
+            structured_summary["tables"].append({
+                "title": "Parties",
+                "data": [{"name": party} for party in parties]
+            })
+        
+        if dates:
+            structured_summary["tables"].append({
+                "title": "Important Dates",
+                "data": [{"date": date} for date in dates]
+            })
+        
+        if amounts:
+            structured_summary["tables"].append({
+                "title": "Financial Amounts",
+                "data": [{"amount": amount} for amount in amounts]
+            })
+        
+        # Extract highlights (important clauses or conditions)
+        highlight_patterns = [
+            r'(?:notwithstanding|provided that|subject to).*?\.',
+            r'(?:in the event|if).*?\.',
+            r'(?:shall not|must not).*?\.'
+        ]
+        
+        for pattern in highlight_patterns:
+            matches = re.findall(pattern, full_summary, re.IGNORECASE)
+            structured_summary["highlights"].extend(matches)
+        
+        return structured_summary
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Summarization error: {str(e)}")
 

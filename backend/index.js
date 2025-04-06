@@ -50,7 +50,7 @@ const fileFilter = (req, file, cb) => {
 const upload = multer({
   storage,
   fileFilter,
-  limits: { fileSize: 20 * 1024 * 1024 } 
+  limits: { fileSize: 20 * 1024 * 1024 }
 });
 
 const callPythonService = async (filePath, mimetype) => {
@@ -92,7 +92,17 @@ const processDocument = async (documentId) => {
 
     const summary = await callPythonService(document.path, document.mimetype);
 
-    document.summary = summary;
+    // Ensure summary is properly structured
+    if (typeof summary === 'string') {
+      document.summary = {
+        key_points: [summary],
+        tables: [],
+        highlights: []
+      };
+    } else {
+      document.summary = summary;
+    }
+
     document.status = 'completed';
     document.processedAt = new Date();
     await document.save();
@@ -115,9 +125,9 @@ app.get('/', (req, res) => {
 app.post('/api/upload', upload.single('document'), async (req, res) => {
   try {
     if (!req.file) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         success: false,
-        error: 'No file uploaded' 
+        error: 'No file uploaded'
       });
     }
 
@@ -142,9 +152,9 @@ app.post('/api/upload', upload.single('document'), async (req, res) => {
     });
   } catch (error) {
     console.error('Upload error:', error.message);
-    res.status(500).json({ 
+    res.status(500).json({
       success: false,
-      error: error.message || 'Server error during upload' 
+      error: error.message || 'Server error during upload'
     });
   }
 });
@@ -153,9 +163,9 @@ app.get('/api/document/:id', async (req, res) => {
   try {
     const document = await Document.findById(req.params.id);
     if (!document) {
-      return res.status(404).json({ 
+      return res.status(404).json({
         success: false,
-        error: 'Document not found' 
+        error: 'Document not found'
       });
     }
 
@@ -173,18 +183,18 @@ app.get('/api/document/:id', async (req, res) => {
     });
   } catch (error) {
     console.error('Document fetch error:', error.message);
-    res.status(500).json({ 
+    res.status(500).json({
       success: false,
-      error: 'Server error' 
+      error: 'Server error'
     });
   }
 });
 
 app.use((err, req, res, next) => {
   console.error(err.stack);
-  res.status(500).json({ 
+  res.status(500).json({
     success: false,
-    error: err.message || 'Something broke!' 
+    error: err.message || 'Something broke!'
   });
 });
 
