@@ -8,21 +8,38 @@ const fs = require('fs');
 const axios = require('axios');
 const FormData = require('form-data');
 const Document = require('./models/Document');
+const translate = require('@vitalets/google-translate-api');
+const cookieParser = require('cookie-parser');
+const { router: authRouter, authenticateToken } = require('./routes/auth');
 
 const app = express();
+const port = process.env.PORT || 3000;
 
+// Configure CORS before any other middleware
 app.use(cors({
-  origin: ['http://localhost:5173'],
-  methods: ['GET', 'POST'],
-  allowedHeaders: ['Content-Type'],
+  origin: 'http://localhost:5173',
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Accept', 'Authorization'],
+  exposedHeaders: ['Set-Cookie'],
   credentials: true
 }));
+
+// Other middleware
 app.use(express.json());
+app.use(cookieParser());
 app.use(express.static(path.join(__dirname, 'public')));
 
-mongoose.connect(process.env.MONGO_URI)
-  .then(() => console.log('Connected to MongoDB'))
-  .catch(err => console.error('MongoDB connection error:', err));
+// Mount auth routes first
+app.use('/api/auth', authRouter);
+
+mongoose.connect(process.env.MONGO_URI || 'mongodb://localhost:27017/legaldoc', {
+  useNewUrlParser: true,
+  useUnifiedTopology: true
+}).then(() => {
+  console.log('Connected to MongoDB');
+}).catch(err => {
+  console.error('MongoDB connection error:', err);
+});
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
@@ -122,7 +139,7 @@ app.get('/', (req, res) => {
   res.send('Legal Document Summarizer API');
 });
 
-app.post('/api/upload', upload.single('document'), async (req, res) => {
+app.post('/api/upload', authenticateToken, upload.single('document'), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({
@@ -137,18 +154,33 @@ app.post('/api/upload', upload.single('document'), async (req, res) => {
       path: req.file.path,
       size: req.file.size,
       mimetype: req.file.mimetype,
-      uploaderIp: req.ip
+      uploaderIp: req.ip,
+      user: req.user._id
     });
 
+    document._fileName = req.file.originalname;
     await document.save();
 
-    processDocument(document._id);
+    // Wait for document processing to complete
+    await processDocument(document._id);
+
+    // Fetch the updated document to get the latest status
+    const updatedDocument = await Document.findById(document._id);
 
     res.status(201).json({
       success: true,
-      message: 'File uploaded successfully. Processing started.',
+      message: 'File uploaded and processed successfully.',
       documentId: document._id,
-      status: document.status
+      status: updatedDocument.status,
+      document: {
+        id: updatedDocument._id,
+        originalName: updatedDocument.originalName,
+        status: updatedDocument.status,
+        summary: updatedDocument.summary,
+        uploadedAt: updatedDocument.uploadedAt,
+        processedAt: updatedDocument.processedAt,
+        error: updatedDocument.error
+      }
     });
   } catch (error) {
     console.error('Upload error:', error.message);
@@ -159,9 +191,12 @@ app.post('/api/upload', upload.single('document'), async (req, res) => {
   }
 });
 
-app.get('/api/document/:id', async (req, res) => {
+app.get('/api/document/:id', authenticateToken, async (req, res) => {
   try {
-    const document = await Document.findById(req.params.id);
+    const document = await Document.findOne({
+      _id: req.params.id,
+      user: req.user._id
+    });
     if (!document) {
       return res.status(404).json({
         success: false,
@@ -190,6 +225,119 @@ app.get('/api/document/:id', async (req, res) => {
   }
 });
 
+app.get('/api/summaries', authenticateToken, async (req, res) => {
+  try {
+    const documents = await Document.find({
+      user: req.user._id,
+      status: 'completed'
+    })
+      .select('originalName summary uploadedAt processedAt')
+      .sort('-uploadedAt')
+      .limit(20);
+
+    const summaries = documents.map(doc => ({
+      _id: doc._id,
+      title: doc.originalName,
+      summary: doc.summary,
+      createdAt: doc.processedAt || doc.uploadedAt
+    }));
+
+    res.json({ summaries });
+  } catch (error) {
+    console.error('Error fetching summaries:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to fetch summaries'
+    });
+  }
+});
+
+app.get('/api/document/:id/status', authenticateToken, async (req, res) => {
+  try {
+    const document = await Document.findOne({
+      _id: req.params.id,
+      user: req.user._id
+    }).select('status error');
+
+    if (!document) {
+      return res.status(404).json({
+        success: false,
+        error: 'Document not found'
+      });
+    }
+
+    res.json({
+      success: true,
+      status: document.status,
+      error: document.error
+    });
+  } catch (error) {
+    console.error('Status check error:', error.message);
+    res.status(500).json({
+      success: false,
+      error: 'Server error'
+    });
+  }
+});
+
+app.post('/api/translate', authenticateToken, async (req, res) => {
+  try {
+    const { text, targetLanguage } = req.body;
+
+    if (!text) {
+      return res.status(400).json({
+        success: false,
+        error: 'No text provided for translation'
+      });
+    }
+
+    const target = targetLanguage === 'hindi' ? 'hi' : 'en';
+
+    let translatedText;
+    if (typeof text === 'string') {
+      const { text: translated } = await translate(text, { to: target });
+      translatedText = translated;
+    } else {
+      // Handle structured data translation
+      const translateObject = async (obj) => {
+        const translated = {};
+        for (const [key, value] of Object.entries(obj)) {
+          if (Array.isArray(value)) {
+            translated[key] = await Promise.all(value.map(async item => {
+              if (typeof item === 'string') {
+                const { text: translatedItem } = await translate(item, { to: target });
+                return translatedItem;
+              }
+              return translateObject(item);
+            }));
+          } else if (typeof value === 'object' && value !== null) {
+            translated[key] = await translateObject(value);
+          } else if (typeof value === 'string') {
+            const { text: translatedValue } = await translate(value, { to: target });
+            translated[key] = translatedValue;
+          } else {
+            translated[key] = value;
+          }
+        }
+        return translated;
+      };
+
+      translatedText = await translateObject(text);
+    }
+
+    res.json({
+      success: true,
+      translatedText
+    });
+  } catch (error) {
+    console.error('Translation error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Translation failed'
+    });
+  }
+});
+
 app.use((err, req, res, next) => {
   console.error(err.stack);
   res.status(500).json({
@@ -198,9 +346,8 @@ app.use((err, req, res, next) => {
   });
 });
 
-const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+app.listen(port, () => {
+  console.log(`Server running on port ${port}`);
   console.log(`Python service URL: ${process.env.PYTHON_SERVICE_URL || 'http://localhost:5001'}`);
 });
 

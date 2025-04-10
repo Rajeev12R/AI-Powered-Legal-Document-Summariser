@@ -1,302 +1,558 @@
-import { useState } from 'react';
+import { useState, useRef, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import FileUpload from '../components/FileUpload';
-import { Gavel, Scale, Landmark, Loader2, XCircle, BookOpen, FileText, FileDigit } from 'lucide-react';
+import SummaryHistory from '../components/SummaryHistory';
+import { documentApi } from '../lib/api';
+import { useAuth } from '../contexts/AuthContext';
+import {
+  Search, Globe2, Settings, User, Menu, ArrowRight, Share2,
+  ThumbsUp, ThumbsDown, Upload, FileText, Command, Home as HomeIcon,
+  Compass, Library, Plus, Mic, Volume2, VolumeX,
+  FolderOpen, BookOpen, History, Scale, Landmark,
+  FileCheck, Filter, LogOut
+} from 'lucide-react';
 
 const Home = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [summary, setSummary] = useState('');
   const [processingStatus, setProcessingStatus] = useState('');
   const [documentId, setDocumentId] = useState(null);
+  const [selectedLanguage, setSelectedLanguage] = useState('english');
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [isExpanded, setIsExpanded] = useState(false);
+  const [showSidebar, setShowSidebar] = useState(false);
+  const { user, isAuthenticated, isAuthLoading, logout } = useAuth();
+  const speechSynthesisRef = useRef(null);
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    if (!isAuthLoading && !isAuthenticated) {
+      navigate('/login');
+    }
+  }, [isAuthenticated, isAuthLoading, navigate]);
 
   const handleFileUpload = async (file) => {
     setIsLoading(true);
-    setProcessingStatus('Uploading document...');
+    setProcessingStatus('Preparing to upload document...');
     setSummary('');
 
     try {
       const formData = new FormData();
       formData.append('document', file);
 
-      const uploadResponse = await fetch('http://localhost:3000/api/upload', {
-        method: 'POST',
-        body: formData,
+      // Show file size in a readable format
+      const fileSizeMB = (file.size / (1024 * 1024)).toFixed(2);
+      setProcessingStatus(`Uploading document (${fileSizeMB} MB)...`);
+
+      const uploadResponse = await documentApi.uploadDocument(formData);
+      console.log('Upload response details:', {
+        fullResponse: uploadResponse,
+        success: uploadResponse.success,
+        documentId: uploadResponse.documentId,
+        message: uploadResponse.message,
+        status: uploadResponse.status,
+        document: uploadResponse.document
       });
 
-      if (!uploadResponse.ok) {
-        throw new Error(`Upload failed with status ${uploadResponse.status}`);
+      if (!uploadResponse.success) {
+        throw new Error(uploadResponse.error || 'Failed to upload document');
       }
 
-      const uploadData = await uploadResponse.json();
-      setDocumentId(uploadData.documentId);
-      setProcessingStatus('Analyzing document content...');
+      const documentId = uploadResponse.documentId;
+      if (!documentId) {
+        throw new Error('No document ID received from server');
+      }
 
-      const result = await pollForSummary(uploadData.documentId);
-      setSummary(result.summary);
-      setProcessingStatus('Analysis complete');
+      setDocumentId(documentId);
+      setProcessingStatus('Document uploaded successfully. Processing content...');
 
+      // If the document is already processed (new format)
+      if (uploadResponse.document?.summary) {
+        setSummary(uploadResponse.document.summary);
+        setProcessingStatus('Analysis complete');
+      } else {
+        // Fall back to polling if needed
+        setProcessingStatus('Processing document...');
+        const result = await pollForSummary(documentId);
+        console.log('Poll result details:', {
+          fullResult: result,
+          success: result.success,
+          status: result.status,
+          document: result.document,
+          error: result.error
+        });
+
+        if (!result.success) {
+          throw new Error(result.error || 'Failed to get document summary');
+        }
+
+        setSummary(result.document?.summary || result.summary);
+        setProcessingStatus('Analysis complete');
+      }
     } catch (error) {
-      console.error('Error:', error);
-      setProcessingStatus(`Error: ${error.message}`);
+      console.error('Error details:', {
+        error,
+        message: error.message,
+        type: typeof error,
+        isObject: error instanceof Object,
+        keys: error instanceof Object ? Object.keys(error) : null
+      });
+      const errorMessage = error.message || (typeof error === 'string' ? error : 'An unknown error occurred');
+      setProcessingStatus(`Error: ${errorMessage}`);
+      setSummary('');
+      setDocumentId(null);
     } finally {
       setIsLoading(false);
     }
   };
 
-  const pollForSummary = async (documentId, interval = 2000, timeout = 120000) => {
-    const startTime = Date.now();
+  const handleTranslate = async () => {
+    if (!summary) return;
+    setIsLoading(true);
+    try {
+      const response = await fetch('http://localhost:3000/api/translate', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+        },
+        credentials: 'include',
+        body: JSON.stringify({
+          text: typeof summary === 'string' ? summary : JSON.stringify(summary),
+          targetLanguage: selectedLanguage
+        }),
+      });
+      const data = await response.json();
+      setSummary(data.translatedText);
+    } catch (error) {
+      console.error('Translation error:', error);
+    } finally {
+      setIsLoading(false);
+    }
+  };
 
-    while (Date.now() - startTime < timeout) {
-      try {
-        const response = await fetch(`http://localhost:3000/api/document/${documentId}`);
+  const handleSpeak = () => {
+    if (!summary) return;
 
-        if (!response.ok) {
-          throw new Error(`Failed to fetch status: ${response.status}`);
-        }
-
-        const data = await response.json();
-
-        if (!data.success) {
-          throw new Error(data.error || 'Server returned unsuccessful response');
-        }
-
-        if (data.document.status === 'completed') {
-          return {
-            summary: data.document.summary,
-            status: 'completed'
-          };
-        } else if (data.document.status === 'failed') {
-          throw new Error(data.document.error || 'Document processing failed');
-        }
-
-        await new Promise(resolve => setTimeout(resolve, interval));
-      } catch (error) {
-        console.error('Polling error:', error);
-        throw error;
-      }
+    if (isPlaying) {
+      window.speechSynthesis.cancel();
+      setIsPlaying(false);
+      return;
     }
 
-    throw new Error('Processing timeout exceeded');
+    const text = typeof summary === 'string' ? summary : JSON.stringify(summary);
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = selectedLanguage === 'hindi' ? 'hi-IN' : 'en-US';
+    utterance.onend = () => setIsPlaying(false);
+
+    window.speechSynthesis.speak(utterance);
+    speechSynthesisRef.current = utterance;
+    setIsPlaying(true);
+  };
+
+  const highlightSearchResults = (text) => {
+    if (!searchQuery) return text;
+    const regex = new RegExp(`(${searchQuery})`, 'gi');
+    return text.replace(regex, '<mark class="bg-violet-500/30 text-white">$1</mark>');
+  };
+
+  const pollForSummary = async (documentId) => {
+    if (!documentId) {
+      throw new Error('Document ID is required for polling');
+    }
+
+    const maxAttempts = 30; // 5 minutes maximum polling time
+    const interval = 10000; // 10 seconds between attempts
+    let attempts = 0;
+
+    const poll = async () => {
+      try {
+        console.log(`Polling attempt ${attempts + 1} for document ${documentId}`);
+        const statusResponse = await documentApi.getDocumentStatus(documentId);
+        console.log('Status response details:', {
+          fullResponse: statusResponse,
+          success: statusResponse.success,
+          status: statusResponse.status,
+          error: statusResponse.error
+        });
+
+        if (!statusResponse.success) {
+          console.error('Status check failed:', statusResponse);
+          throw new Error(statusResponse.error || 'Failed to get document status');
+        }
+
+        if (!statusResponse.status) {
+          console.error('Invalid status response:', statusResponse);
+          throw new Error('Invalid status response from server');
+        }
+
+        if (statusResponse.status === 'failed') {
+          throw new Error(statusResponse.error || 'Document processing failed');
+        }
+
+        if (statusResponse.status === 'completed') {
+          const docResponse = await documentApi.getDocument(documentId);
+          console.log('Document response details:', {
+            fullResponse: docResponse,
+            success: docResponse.success,
+            document: docResponse.document,
+            error: docResponse.error
+          });
+
+          if (!docResponse.success) {
+            throw new Error(docResponse.error || 'Failed to get document summary');
+          }
+
+          if (!docResponse.document?.summary) {
+            throw new Error('Document summary not found in response');
+          }
+
+          return docResponse;
+        }
+
+        // Still processing
+        if (attempts >= maxAttempts) {
+          throw new Error('Processing timeout exceeded');
+        }
+
+        attempts++;
+        await new Promise(resolve => setTimeout(resolve, interval));
+        return poll();
+      } catch (error) {
+        console.error('Polling error details:', {
+          error,
+          message: error.message,
+          type: typeof error,
+          isObject: error instanceof Object,
+          keys: error instanceof Object ? Object.keys(error) : null
+        });
+        throw error;
+      }
+    };
+
+    return poll();
+  };
+
+  const handleSelectSummary = (selectedSummary) => {
+    setSummary(selectedSummary.summary);
+    setDocumentId(selectedSummary._id);
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-gray-50 to-blue-50 flex flex-col">
-      <header className="bg-white shadow-sm py-4 border-b border-gray-200">
-        <div className="container mx-auto px-4 flex justify-between items-center">
-          <div className="flex items-center space-x-2">
-            <BookOpen className="w-6 h-6 text-blue-600" />
-            <h1 className="text-2xl font-bold bg-gradient-to-r from-blue-600 to-blue-800 bg-clip-text text-transparent">
-              LegalEase Summarizer
-            </h1>
+    <div className="flex h-screen bg-[#0C0C0C] text-gray-100">
+      {/* Sidebar */}
+      <div className="w-[270px] border-r border-gray-800 flex flex-col">
+        <div className="p-4">
+          <div className="flex items-center space-x-3 mb-6">
+            <Scale className="w-8 h-8 text-violet-400" />
+            <span className="text-lg font-semibold">LegalDoc AI</span>
           </div>
-          <div className="hidden md:flex items-center space-x-1 text-sm text-gray-500">
-            <FileText className="w-4 h-4" />
-            <span>Supports: PDF, DOCX, Images</span>
+
+          {/* New Analysis Button */}
+          <button className="w-full flex items-center space-x-2 px-4 py-2 bg-violet-600 hover:bg-violet-700 rounded-lg text-sm mb-4">
+            <Upload size={16} />
+            <span>New Analysis</span>
+            <div className="ml-auto flex items-center space-x-1 text-xs">
+              <Command size={14} />
+              <span>N</span>
+            </div>
+          </button>
+
+          {/* Navigation */}
+          <nav className="space-y-1">
+            {/* Recent Documents Section */}
+            <div className="mb-4">
+              <div className="px-3 py-2 text-xs font-semibold text-gray-400 uppercase tracking-wider">
+                Documents
+              </div>
+              <button className="w-full flex items-center space-x-3 px-3 py-2 text-gray-300 hover:text-white rounded-lg hover:bg-gray-800">
+                <FolderOpen size={20} />
+                <span>Recent Documents</span>
+              </button>
+              <button className="w-full flex items-center space-x-3 px-3 py-2 text-gray-300 hover:text-white rounded-lg hover:bg-gray-800">
+                <History size={20} />
+                <span>Analysis History</span>
+              </button>
+            </div>
+
+            {/* Document Types Section */}
+            <div className="mb-4">
+              <div className="px-3 py-2 text-xs font-semibold text-gray-400 uppercase tracking-wider">
+                Document Types
+              </div>
+              <button className="w-full flex items-center space-x-3 px-3 py-2 text-gray-300 hover:text-white rounded-lg hover:bg-gray-800">
+                <Landmark size={20} />
+                <span>Contracts</span>
+              </button>
+              <button className="w-full flex items-center space-x-3 px-3 py-2 text-gray-300 hover:text-white rounded-lg hover:bg-gray-800">
+                <FileCheck size={20} />
+                <span>Agreements</span>
+              </button>
+              <button className="w-full flex items-center space-x-3 px-3 py-2 text-gray-300 hover:text-white rounded-lg hover:bg-gray-800">
+                <BookOpen size={20} />
+                <span>Legal Reports</span>
+              </button>
+            </div>
+
+            {/* Tools Section */}
+            <div className="mb-4">
+              <div className="px-3 py-2 text-xs font-semibold text-gray-400 uppercase tracking-wider">
+                Tools
+              </div>
+              <button className="w-full flex items-center space-x-3 px-3 py-2 text-gray-300 hover:text-white rounded-lg hover:bg-gray-800">
+                <Filter size={20} />
+                <span>Advanced Filters</span>
+              </button>
+              <button className="w-full flex items-center space-x-3 px-3 py-2 text-gray-300 hover:text-white rounded-lg hover:bg-gray-800">
+                <FileText size={20} />
+                <span>Batch Analysis</span>
+              </button>
+            </div>
+          </nav>
+        </div>
+
+        <div className="flex-1 overflow-y-auto px-4">
+          <div className="mb-4">
+            <div className="px-3 py-2 text-xs font-semibold text-gray-400 uppercase tracking-wider">
+              Recent Analyses
+            </div>
+            <SummaryHistory onSelectSummary={handleSelectSummary} />
           </div>
         </div>
-      </header>
 
-      <main className="flex-grow container mx-auto px-4 py-8 md:py-12">
-        <div className="text-center mb-12">
-          <div className="inline-block bg-blue-100 rounded-full p-3 mb-4">
-            <FileDigit className="w-8 h-8 text-blue-600" />
+        <div className="p-4 border-t border-gray-800">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center space-x-3">
+              <div className="w-8 h-8 bg-gray-700 rounded-full flex items-center justify-center">
+                <User size={18} className="text-gray-300" />
+              </div>
+              <div>
+                <p className="text-sm font-medium">{user?.name || 'Guest User'}</p>
+                <p className="text-xs text-gray-400">{user?.email}</p>
+              </div>
+            </div>
+            <div className="flex items-center space-x-0">
+              <button className="p-2 text-gray-400 hover:text-white rounded-lg hover:bg-gray-800">
+                <Settings size={20} />
+              </button>
+              <button
+                onClick={logout}
+                className="p-2 text-gray-400 hover:text-white rounded-lg hover:bg-gray-800"
+                title="Logout"
+              >
+                <LogOut size={20} />
+              </button>
+            </div>
           </div>
-          <h2 className="text-3xl md:text-4xl font-bold text-gray-800 mb-3">
-            AI-Powered Legal Document Analysis
-          </h2>
-          <p className="text-lg md:text-xl text-gray-600 max-w-2xl mx-auto">
-            Transform complex legal documents into clear, actionable summaries with our advanced AI technology.
-          </p>
         </div>
+      </div>
 
-        <div className="max-w-4xl mx-auto h-auto p-10 bg-white rounded-xl shadow-md overflow-hidden border border-gray-200">
-          <FileUpload onFileUpload={handleFileUpload} isLoading={isLoading} />
-        </div>
+      {/* Main Content */}
+      <div className="flex-1 flex flex-col">
+        <main className="flex-1 overflow-y-auto">
+          <div className="max-w-3xl mx-auto px-4 py-8">
+            <div className="flex flex-col items-center justify-center min-h-[60vh] text-center mb-8">
+              <h1 className="text-4xl font-semibold mb-6 text-white">
+                What document would you like to analyze?
+              </h1>
 
-        {/* Results Section */}
-        <div className="mt-12 max-w-4xl mx-auto">
-          {processingStatus && (
-            <div className={`p-4 rounded-lg mb-6 transition-all duration-300 ${processingStatus.startsWith('Error:')
-              ? 'bg-red-50 border border-red-200'
-              : 'bg-blue-50 border border-blue-200'
-              }`}>
-              <div className="flex items-start">
-                {isLoading ? (
-                  <Loader2 className="w-5 h-5 mr-3 mt-0.5 text-blue-600 animate-spin" />
-                ) : processingStatus.startsWith('Error:') ? (
-                  <XCircle className="w-5 h-5 mr-3 mt-0.5 text-red-600" />
-                ) : (
-                  <div className="w-5 h-5 mr-3 mt-0.5 flex items-center justify-center">
-                    <div className="w-2 h-2 bg-blue-600 rounded-full animate-pulse"></div>
+              {/* Upload Section */}
+              <div className="w-full max-w-2xl relative mb-8">
+                <div className="relative">
+                  <div className="absolute inset-0 bg-gradient-to-r from-violet-600/20 to-indigo-600/20 rounded-xl blur"></div>
+                  <div className="relative bg-gray-900 rounded-xl border border-gray-800 p-4">
+                    <FileUpload onFileUpload={handleFileUpload} isLoading={isLoading} />
                   </div>
-                )}
-                <div>
-                  <p className={`font-medium ${processingStatus.startsWith('Error:') ? 'text-red-600' : 'text-blue-600'
-                    }`}>
-                    {processingStatus}
-                  </p>
-                  {processingStatus.includes('OCR') && (
-                    <p className="text-sm mt-1 text-red-500">
-                      For image-based documents, ensure proper text visibility for accurate analysis.
-                    </p>
+                </div>
+              </div>
+
+              {/* Pro Badge */}
+              <div className="flex items-center space-x-2 px-3 py-1 bg-gray-800 rounded-full text-xs font-medium text-gray-300">
+                <span className="w-2 h-2 bg-teal-400 rounded-full"></span>
+                <span>Deep Summary</span>
+              </div>
+            </div>
+
+            {/* Processing Status */}
+            {processingStatus && (
+              <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 mb-6">
+                <div className="flex items-center space-x-3">
+                  {isLoading ? (
+                    <div className="w-5 h-5 border-2 border-violet-500 border-t-transparent rounded-full animate-spin" />
+                  ) : (
+                    <div className="w-5 h-5 bg-violet-500 rounded-full" />
                   )}
+                  <p className="text-gray-300">{processingStatus}</p>
                 </div>
               </div>
-            </div>
-          )}
+            )}
 
-          {summary && (
-            <div className="bg-white rounded-xl shadow-md overflow-hidden border border-gray-200 transition-all duration-500 animate-fadeIn">
-              <div className="bg-gradient-to-r from-blue-600 to-blue-800 px-6 py-4">
-                <h3 className="text-xl font-semibold text-white flex items-center">
-                  <FileText className="w-5 h-5 mr-2" />
-                  Document Summary
-                </h3>
-              </div>
-              <div className="p-6">
-                {/* Handle both string and structured summaries */}
-                {typeof summary === 'string' ? (
-                  <div className="prose max-w-none">
-                    {summary.split('\n').map((para, i) => (
-                      <p key={i} className="mb-4 text-gray-700 leading-relaxed">
-                        {para}
-                      </p>
-                    ))}
+            {/* Summary Section */}
+            {summary && (
+              <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+                <div className="p-6 border-b border-gray-800">
+                  <div className="flex items-center justify-between mb-4">
+                    <h2 className="text-xl font-semibold">Document Analysis</h2>
+                    <div className="flex items-center space-x-2">
+                      <button
+                        onClick={handleSpeak}
+                        className="p-2 hover:bg-gray-800 rounded-lg transition-colors"
+                      >
+                        {isPlaying ? (
+                          <Volume2 size={20} className="text-gray-400" />
+                        ) : (
+                          <VolumeX size={20} className="text-gray-400" />
+                        )}
+                      </button>
+                      <button className="p-2 hover:bg-gray-800 rounded-lg transition-colors">
+                        <Share2 size={20} className="text-gray-400" />
+                      </button>
+                    </div>
                   </div>
-                ) : (
-                  <>
-                    {/* Key Points Section */}
-                    {summary.key_points && summary.key_points.length > 0 && (
-                      <div className="mb-8">
-                        <h4 className="text-lg font-semibold text-gray-800 mb-4 flex items-center">
-                          <span className="w-2 h-2 bg-blue-600 rounded-full mr-2"></span>
-                          Key Points
-                        </h4>
-                        <ul className="space-y-3">
-                          {summary.key_points.map((point, index) => (
-                            <li key={index} className="flex items-start">
-                              <span className="text-blue-600 mr-2">•</span>
-                              <span className="text-gray-700">{point}</span>
-                            </li>
-                          ))}
-                        </ul>
-                      </div>
-                    )}
 
-                    {/* Tables Section */}
-                    {summary.tables && summary.tables.length > 0 && (
-                      <div className="mb-8">
-                        <h4 className="text-lg font-semibold text-gray-800 mb-4 flex items-center">
-                          <span className="w-2 h-2 bg-blue-600 rounded-full mr-2"></span>
-                          Structured Information
-                        </h4>
-                        <div className="space-y-6">
-                          {summary.tables.map((table, index) => (
-                            <div key={index} className="overflow-x-auto">
-                              <h5 className="text-md font-medium text-gray-700 mb-2">{table.title}</h5>
-                              <table className="min-w-full divide-y divide-gray-200">
-                                <thead className="bg-gray-50">
-                                  <tr>
-                                    {Object.keys(table.data[0]).map((header) => (
-                                      <th key={header} className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                                        {header}
-                                      </th>
-                                    ))}
-                                  </tr>
-                                </thead>
-                                <tbody className="bg-white divide-y divide-gray-200">
-                                  {table.data.map((row, rowIndex) => (
-                                    <tr key={rowIndex}>
-                                      {Object.values(row).map((value, colIndex) => (
-                                        <td key={colIndex} className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                                          {value}
-                                        </td>
-                                      ))}
-                                    </tr>
-                                  ))}
-                                </tbody>
-                              </table>
+                  <div className="relative">
+                    <input
+                      type="text"
+                      placeholder="Search in summary..."
+                      value={searchQuery}
+                      onChange={(e) => setSearchQuery(e.target.value)}
+                      className="w-full bg-gray-800 text-gray-100 pl-10 pr-4 py-2 rounded-lg border border-gray-700 focus:outline-none focus:border-gray-600 focus:ring-1 focus:ring-gray-600"
+                    />
+                    <Search className="w-5 h-5 text-gray-400 absolute left-3 top-1/2 transform -translate-y-1/2" />
+                    <button className="absolute right-3 top-1/2 transform -translate-y-1/2">
+                      <Mic size={20} className="text-gray-400" />
+                    </button>
+                  </div>
+                </div>
+
+                <div className="p-6">
+                  <div className="space-y-6">
+                    {typeof summary === 'string' ? (
+                      <div className="prose prose-invert max-w-none">
+                        {summary.split('\n').map((para, i) => (
+                          <p
+                            key={i}
+                            className="text-gray-300 leading-relaxed"
+                            dangerouslySetInnerHTML={{
+                              __html: highlightSearchResults(para)
+                            }}
+                          />
+                        ))}
+                      </div>
+                    ) : (
+                      <>
+                        {/* Key Points */}
+                        {summary.key_points?.length > 0 && (
+                          <div>
+                            <h3 className="text-lg font-medium text-gray-100 mb-4">Key Points</h3>
+                            <ul className="space-y-3">
+                              {summary.key_points.map((point, index) => (
+                                <li key={index} className="flex items-start">
+                                  <ArrowRight className="w-5 h-5 text-violet-400 mt-0.5 mr-3 flex-shrink-0" />
+                                  <span
+                                    className="text-gray-300"
+                                    dangerouslySetInnerHTML={{
+                                      __html: highlightSearchResults(point)
+                                    }}
+                                  />
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+
+                        {/* Tables */}
+                        {summary.tables?.length > 0 && (
+                          <div>
+                            <h3 className="text-lg font-medium text-gray-100 mb-4">Important Data</h3>
+                            <div className="space-y-4">
+                              {summary.tables.map((table, index) => (
+                                <div key={index} className="overflow-x-auto">
+                                  <table className="min-w-full divide-y divide-gray-800">
+                                    <tbody className="divide-y divide-gray-800">
+                                      {Array.isArray(table.data) ? (
+                                        // Handle array of objects format
+                                        table.data.map((row, rowIndex) => (
+                                          <tr key={rowIndex}>
+                                            {Object.entries(row).map(([key, value], cellIndex) => (
+                                              <td
+                                                key={`${rowIndex}-${cellIndex}`}
+                                                className={`py-3 px-4 ${cellIndex === 0 ? 'text-gray-400' : 'text-gray-300'}`}
+                                                dangerouslySetInnerHTML={{
+                                                  __html: highlightSearchResults(String(value))
+                                                }}
+                                              />
+                                            ))}
+                                          </tr>
+                                        ))
+                                      ) : (
+                                        // Handle key-value object format
+                                        Object.entries(table.data || table).map(([key, value], rowIndex) => (
+                                          <tr key={rowIndex}>
+                                            <td className="py-3 px-4 text-gray-400">{key}</td>
+                                            <td
+                                              className="py-3 px-4 text-gray-300"
+                                              dangerouslySetInnerHTML={{
+                                                __html: highlightSearchResults(
+                                                  typeof value === 'object' ?
+                                                    JSON.stringify(value) :
+                                                    String(value)
+                                                )
+                                              }}
+                                            />
+                                          </tr>
+                                        ))
+                                      )}
+                                    </tbody>
+                                  </table>
+                                </div>
+                              ))}
                             </div>
-                          ))}
-                        </div>
-                      </div>
-                    )}
+                          </div>
+                        )}
 
-                    {/* Highlights Section */}
-                    {summary.highlights && summary.highlights.length > 0 && (
-                      <div className="mb-8">
-                        <h4 className="text-lg font-semibold text-gray-800 mb-4 flex items-center">
-                          <span className="w-2 h-2 bg-blue-600 rounded-full mr-2"></span>
-                          Important Clauses
-                        </h4>
-                        <div className="space-y-3">
-                          {summary.highlights.map((highlight, index) => (
-                            <div key={index} className="bg-yellow-50 border-l-4 border-yellow-400 p-4">
-                              <p className="text-gray-700">{highlight}</p>
+                        {/* Highlights */}
+                        {summary.highlights?.length > 0 && (
+                          <div>
+                            <h3 className="text-lg font-medium text-gray-100 mb-4">Important Clauses</h3>
+                            <div className="space-y-4">
+                              {summary.highlights.map((highlight, index) => (
+                                <div key={index} className="p-4 bg-gray-800/50 rounded-lg border border-gray-700">
+                                  <p
+                                    className="text-gray-300"
+                                    dangerouslySetInnerHTML={{
+                                      __html: highlightSearchResults(highlight)
+                                    }}
+                                  />
+                                </div>
+                              ))}
                             </div>
-                          ))}
-                        </div>
-                      </div>
+                          </div>
+                        )}
+                      </>
                     )}
-                  </>
-                )}
+                  </div>
 
-                <div className="mt-6 pt-4 border-t border-gray-100 flex justify-end">
-                  <button
-                    onClick={() => navigator.clipboard.writeText(
-                      typeof summary === 'string' ? summary : JSON.stringify(summary, null, 2)
-                    )}
-                    className="px-4 py-2 bg-blue-50 hover:bg-blue-100 text-blue-600 rounded-md text-sm font-medium transition-colors"
-                  >
-                    Copy Summary
-                  </button>
+                  {/* Actions */}
+                  <div className="mt-8 flex items-center justify-between">
+                    <div className="flex items-center space-x-4">
+                      <button className="inline-flex items-center px-4 py-2 bg-gray-800 hover:bg-gray-700 rounded-lg transition-colors">
+                        <ThumbsUp size={20} className="mr-2 text-gray-400" />
+                        <span className="text-gray-300">Helpful</span>
+                      </button>
+                      <button className="inline-flex items-center px-4 py-2 bg-gray-800 hover:bg-gray-700 rounded-lg transition-colors">
+                        <ThumbsDown size={20} className="mr-2 text-gray-400" />
+                        <span className="text-gray-300">Not Helpful</span>
+                      </button>
+                    </div>
+                  </div>
                 </div>
               </div>
-            </div>
-          )}
-        </div>
-
-        {/* Features Section */}
-        <div className="mt-16">
-          <h3 className="text-2xl font-bold text-center text-gray-800 mb-8">
-            Powerful Legal Document Analysis
-          </h3>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-            <FeatureCard
-              icon={<Gavel className="w-6 h-6 text-blue-600" />}
-              title="Contract Analysis"
-              description="Identify key clauses, obligations, and potential risks in contracts with precision."
-              gradient="from-blue-50 to-blue-100"
-            />
-            <FeatureCard
-              icon={<Scale className="w-6 h-6 text-blue-600" />}
-              title="Case Law Summaries"
-              description="Extract core arguments and rulings from lengthy legal decisions instantly."
-              gradient="from-purple-50 to-purple-100"
-            />
-            <FeatureCard
-              icon={<Landmark className="w-6 h-6 text-blue-600" />}
-              title="Regulation Breakdown"
-              description="Understand complex regulations with clear, structured summaries."
-              gradient="from-indigo-50 to-indigo-100"
-            />
+            )}
           </div>
-        </div>
-      </main>
-
-      <footer className="bg-white border-t border-gray-200 py-8">
-        <div className="container mx-auto px-4">
-          <div className="flex flex-col md:flex-row justify-between items-center">
-            <div className="flex items-center space-x-2 mb-4 md:mb-0">
-              <BookOpen className="w-5 h-5 text-blue-600" />
-              <span className="text-lg font-medium text-gray-800">LegalEase</span>
-            </div>
-            <div className="text-sm text-gray-500 text-center md:text-right">
-              <p>AI-powered legal document analysis platform</p>
-              <p className="mt-1">© {new Date().getFullYear()} LegalEase Summarizer. All rights reserved.</p>
-            </div>
-          </div>
-        </div>
-      </footer>
+        </main>
+      </div>
     </div>
   );
 };
